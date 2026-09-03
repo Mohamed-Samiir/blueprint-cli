@@ -1,0 +1,27 @@
+{
+  "name": "create-blueprint-app",
+  "version": "0.1.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "bin": {
+    "create-blueprint-app": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --clean",
+    "dev": "tsup src/index.ts --format esm --watch --onSuccess \"node dist/index.js\""
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.7.0",
+    "execa": "^10.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "tsup": "^8.5.1",
+    "typescript": "^7.0.2"
+  }
+}
