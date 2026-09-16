@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { resolve } from 'node:path';
 import {
   intro,
   outro,
@@ -7,90 +8,146 @@ import {
   confirm,
   isCancel,
   cancel,
-} from "@clack/prompts";
-import { execa } from "execa";
-import { resolveFoundationVersion } from "./resolve-version";
+  log,
+} from '@clack/prompts';
+import { resolveFoundationVersion } from '@blueprint-platform/cli-core';
+import { createWorkspace } from './lib/create-workspace';
+import { registryArgs } from './lib/registry';
+import { ADMIN_TEMPLATE_PRESET_OPTIONS, runAdminModules } from './lib/admin-template';
+
+type Channel = 'stable' | 'latest';
+
+interface PresetOptions {
+  layout: string;
+  showThemeSwitcher?: boolean;
+  showLanguageSwitcher?: boolean;
+}
+
+/** The "Blank" flow's own layout/switcher questions — unchanged from the original design sketch. */
+async function promptBlankPresetOptions(): Promise<PresetOptions | symbol> {
+  const layout = await select({
+    message: 'Choose a layout:',
+    options: [
+      { value: 'sidebar-shell', label: 'Sidebar' },
+      { value: 'floating-shell', label: 'Floating sidebar' },
+      { value: 'inset-shell', label: 'Inset sidebar' },
+      { value: 'topbar-shell', label: 'Top bar (no sidebar)' },
+      { value: 'none', label: "None — I'll build my own shell" },
+    ],
+  });
+  if (isCancel(layout)) return layout;
+
+  // Both switchers only make sense with layout chrome to live in — skip both
+  // questions entirely for `none`, matching preset.ts's own `layout !== 'none'`
+  // gating.
+  if (layout === 'none') {
+    return { layout };
+  }
+
+  const showThemeSwitcher = await confirm({
+    message: 'Enable theme switching?',
+    initialValue: true,
+  });
+  if (isCancel(showThemeSwitcher)) return showThemeSwitcher;
+
+  const showLanguageSwitcher = await confirm({
+    message: 'Enable language switching?',
+    initialValue: true,
+  });
+  if (isCancel(showLanguageSwitcher)) return showLanguageSwitcher;
+
+  return { layout, showThemeSwitcher, showLanguageSwitcher };
+}
 
 async function main() {
-  intro("Blueprint — Angular project builder");
+  intro('Blueprint — Angular project builder');
 
   const name = await text({
-    message: "Project name?",
-    validate: (value) => (value?.trim().length === 0 ? "Required" : undefined),
+    message: 'Project name?',
+    validate: (value) => (value?.trim().length === 0 ? 'Required' : undefined),
   });
-  if (isCancel(name)) return cancel("Cancelled.");
+  if (isCancel(name)) return cancel('Cancelled.');
 
-  const channel = await select({
-    message: "Release channel?",
+  const template = await select({
+    message: 'Starting point?',
     options: [
-      { value: "stable", label: "Stable (recommended)" },
-      { value: "latest", label: "Latest (may include unreleased changes)" },
+      {
+        value: 'blank',
+        label: 'Blank',
+        hint: "pick a layout and switchers yourself",
+      },
+      {
+        value: 'admin-dashboard',
+        label: 'Admin Dashboard',
+        hint: 'sidebar layout + auth + roles/permissions + user management, preconfigured',
+      },
     ],
   });
-  if (isCancel(channel)) return cancel("Cancelled.");
+  if (isCancel(template)) return cancel('Cancelled.');
 
-  const rtl = await confirm({ message: "Enable RTL?", initialValue: false });
-  if (isCancel(rtl)) return cancel("Cancelled.");
-
-  const layout = await select({
-    message: "Choose a layout:",
+  const channel = (await select({
+    message: 'Release channel?',
     options: [
-      { value: "sidebar-shell", label: "Sidebar" },
-      { value: "floating-shell", label: "Floating sidebar" },
-      { value: "inset-shell", label: "Inset sidebar" },
-      { value: "topbar-shell", label: "Top bar (no sidebar)" },
-      { value: "none", label: "None — I'll build my own shell" },
+      { value: 'stable', label: 'Stable (recommended)' },
+      { value: 'latest', label: 'Latest (may include unreleased changes)' },
     ],
-  });
-  if (isCancel(layout)) return cancel("Cancelled.");
+    initialValue: 'stable',
+  })) as Channel | symbol;
+  if (isCancel(channel)) return cancel('Cancelled.');
 
-  // Both switchers only make sense with layout chrome to live in —
-  // skip both questions entirely for `none`, matching preset.ts's own
-  // layout !== 'none' gating.
-  let showThemeSwitcher: boolean | undefined;
-  let showLanguageSwitcher: boolean | undefined;
+  const rtl = await confirm({ message: 'Enable RTL?', initialValue: false });
+  if (isCancel(rtl)) return cancel('Cancelled.');
 
-  if (layout !== "none") {
-    const themeAnswer = await confirm({
-      message: "Enable theme switching?",
-      initialValue: true,
-    });
-    if (isCancel(themeAnswer)) return cancel("Cancelled.");
-    showThemeSwitcher = themeAnswer;
-
-    const languageAnswer = await confirm({
-      message: "Enable language switching?",
-      initialValue: true,
-    });
-    if (isCancel(languageAnswer)) return cancel("Cancelled.");
-    showLanguageSwitcher = languageAnswer;
+  let presetOptions: PresetOptions;
+  if (template === 'admin-dashboard') {
+    presetOptions = { ...ADMIN_TEMPLATE_PRESET_OPTIONS };
+  } else {
+    const result = await promptBlankPresetOptions();
+    if (isCancel(result)) return cancel('Cancelled.');
+    presetOptions = result;
   }
 
   const registry = process.env.BLUEPRINT_REGISTRY;
 
-  const version = await resolveFoundationVersion(
-    channel as "stable" | "latest",
-    registry,
-  );
+  // Display-only — never embedded in `--preset=`. Resolving a scoped
+  // package's version and passing it as `@scope/pkg@x.y.z` to
+  // `create-nx-workspace` is unreliable on the Nx version this targets
+  // (Nx issue #23174); the actual scaffold call below always uses the
+  // dist-tag name (`@stable`/`@latest`) literally instead. This call is
+  // purely so the developer sees which concrete version they're getting,
+  // and fails fast if the channel/registry combo doesn't resolve.
+  try {
+    const resolved = await resolveFoundationVersion(channel as Channel, registry);
+    log.info(`Scaffolding with @blueprint-platform/foundation ${resolved} ("${channel}")`);
+  } catch (err) {
+    log.warn(err instanceof Error ? err.message : String(err));
+  }
 
   const args = [
-    "create-nx-workspace@latest",
     String(name),
-    `--preset=@blueprint-platform/foundation@${version}`,
+    `--preset=@blueprint-platform/foundation@${channel}`,
     `--rtl=${rtl}`,
-    `--layout=${layout}`,
+    `--layout=${presetOptions.layout}`,
+    // Skips the unrelated Nx Cloud sign-up prompt that create-nx-workspace
+    // otherwise asks on top of everything already asked above.
+    '--nxCloud=skip',
   ];
-  if (showThemeSwitcher !== undefined) {
-    args.push(`--showThemeSwitcher=${showThemeSwitcher}`);
+  if (presetOptions.showThemeSwitcher !== undefined) {
+    args.push(`--showThemeSwitcher=${presetOptions.showThemeSwitcher}`);
   }
-  if (showLanguageSwitcher !== undefined) {
-    args.push(`--showLanguageSwitcher=${showLanguageSwitcher}`);
+  if (presetOptions.showLanguageSwitcher !== undefined) {
+    args.push(`--showLanguageSwitcher=${presetOptions.showLanguageSwitcher}`);
   }
-  if (registry) args.push(`--registry=${registry}`);
+  args.push(...registryArgs(registry));
 
-  //   await execa("npx", args, { stdio: "inherit" });
+  await createWorkspace(args);
 
-  console.log(`Running: npx ${args.join(" ")}`);
+  if (template === 'admin-dashboard') {
+    // `rootProject: true` (blueprint-platform's flattened-layout convention)
+    // means the new workspace lives directly at `./<name>`, not `./<name>/apps/<name>`.
+    const cwd = resolve(process.cwd(), String(name));
+    await runAdminModules(cwd, registry);
+  }
 
   outro(`Done — cd ${name} && npx nx serve ${name}`);
 }
